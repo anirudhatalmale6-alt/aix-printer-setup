@@ -1,0 +1,541 @@
+============================================================
+  AIX 4.3 Network Printer Setup - Step-by-Step Guide
+  Printers: Kyocera (PCL 6) and EPSON FX Emulation
+  All commands use native AIX utilities only
+============================================================
+
+
+BEFORE YOU START
+----------------
+You will need:
+  - Root access to the AIX 4.3 server
+  - IP address of each printer
+  - Port number (usually 9100 for JetDirect)
+  - Your company header text ready
+
+Log in as root:
+  su - root
+
+Confirm you are on AIX:
+  uname -a
+  oslevel
+
+Check that the print subsystem is running:
+  lssrc -s qdaemon
+
+If it says "inoperative", start it:
+  startsrc -s qdaemon
+
+Check what queues already exist (for reference):
+  lpstat -a
+
+
+============================================================
+PART 1: SET UP THE KYOCERA PRINTER (PCL 6)
+============================================================
+
+In this section we will:
+  A. Create the header/logo filter
+  B. Create the print queue
+  C. Attach the filter to the queue
+  D. Test it
+
+
+---- STEP 1A: Create directories for our files ----
+
+  mkdir -p /usr/local/lib/aix-print-filters
+  mkdir -p /usr/local/etc/aix-print
+
+
+---- STEP 1B: Create the header text file ----
+
+Open a new file in vi:
+
+  vi /usr/local/etc/aix-print/kyocera_header.txt
+
+Type the following (press i to enter insert mode), replacing
+with your actual company information:
+
+  ================================================================
+                       YOUR COMPANY NAME
+                  123 Business St, City, State
+                     Phone: (555) 123-4567
+  ================================================================
+
+Save and exit (press Esc, then type :wq and press Enter).
+
+To verify it saved correctly:
+
+  cat /usr/local/etc/aix-print/kyocera_header.txt
+
+
+---- STEP 1C: Create the logo file (ASCII art) ----
+
+Open a new file:
+
+  vi /usr/local/etc/aix-print/kyocera_logo.txt
+
+Type your ASCII art logo. For example:
+
+       ___   ___   ___
+      /   \ /   \ /   \
+     | A | | B | | C |
+      \___/ \___/ \___/
+       YOUR COMPANY
+
+Save and exit (:wq).
+
+If you do not want a logo, skip this step. The filter
+will work fine without it.
+
+
+---- STEP 1D: Create the print filter ----
+
+This is a small shell script that the print system calls
+for every job. It reads your header and logo files and
+puts them at the top of the output.
+
+Open a new file:
+
+  vi /usr/local/lib/aix-print-filters/kyocera_filter
+
+Type the following exactly (press i for insert mode):
+
+--- CUT HERE ---
+#!/usr/bin/ksh
+HEADER="/usr/local/etc/aix-print/kyocera_header.txt"
+LOGO="/usr/local/etc/aix-print/kyocera_logo.txt"
+TEMP="/tmp/prt_$$"
+trap 'rm -f "$TEMP"' EXIT
+{
+  if [ -f "$LOGO" ] && [ -s "$LOGO" ]; then
+    cat "$LOGO"
+    print ""
+  fi
+  if [ -f "$HEADER" ] && [ -s "$HEADER" ]; then
+    cat "$HEADER"
+    print ""
+  fi
+  cat
+} > "$TEMP"
+cat "$TEMP"
+exit 0
+--- CUT HERE ---
+
+Save and exit (:wq).
+
+Make it executable:
+
+  chmod 755 /usr/local/lib/aix-print-filters/kyocera_filter
+
+Verify it works by testing it right now:
+
+  echo "This is a test" | /usr/local/lib/aix-print-filters/kyocera_filter
+
+You should see your logo, then your header, then "This is a test"
+at the bottom. If so, the filter is working correctly.
+
+
+---- STEP 1E: Back up /etc/qconfig ----
+
+Always back up before touching the print config:
+
+  cp /etc/qconfig /etc/qconfig.backup.$(date '+%Y%m%d')
+
+Verify the backup:
+
+  ls -la /etc/qconfig.backup.*
+
+
+---- STEP 1F: Create the print queue ----
+
+Replace KYOCERA_IP with your actual printer IP address.
+Replace QUEUE_NAME with whatever you want to call it
+(e.g., kyocera_main, np_floor1, etc.).
+
+  mkque -q QUEUE_NAME \
+    -a "up = TRUE" \
+    -a "s_statfilter = /usr/lib/lpd/bsdshort" \
+    -a "l_statfilter = /usr/lib/lpd/bsdlong"
+
+Example with real values:
+
+  mkque -q kyocera_main \
+    -a "up = TRUE" \
+    -a "s_statfilter = /usr/lib/lpd/bsdshort" \
+    -a "l_statfilter = /usr/lib/lpd/bsdlong"
+
+
+---- STEP 1G: Create the queue device ----
+
+This tells AIX how to reach the physical printer.
+
+For JetDirect (port 9100, which is standard for Kyocera):
+
+  mkquedev -q QUEUE_NAME -d QUEUE_NAME_dev \
+    -a "backend = /usr/lib/lpd/rembak" \
+    -a "flags = -S -p9100" \
+    -a "host = KYOCERA_IP" \
+    -a "s_statfilter = /usr/lib/lpd/bsdshort" \
+    -a "l_statfilter = /usr/lib/lpd/bsdlong"
+
+Example with real values:
+
+  mkquedev -q kyocera_main -d kyocera_main_dev \
+    -a "backend = /usr/lib/lpd/rembak" \
+    -a "flags = -S -p9100" \
+    -a "host = 10.1.2.50" \
+    -a "s_statfilter = /usr/lib/lpd/bsdshort" \
+    -a "l_statfilter = /usr/lib/lpd/bsdlong"
+
+Verify the queue was created:
+
+  lpstat -a
+
+You should see your new queue in the list.
+
+
+---- STEP 1H: Attach the filter to the queue ----
+
+Now we edit /etc/qconfig to tell the queue device to
+use our filter as its output filter.
+
+  vi /etc/qconfig
+
+Scroll down (or search with /QUEUE_NAME_dev) until you
+find the device stanza. It will look something like:
+
+  kyocera_main_dev:
+          backend = /usr/lib/lpd/rembak
+          flags = -S -p9100
+          host = 10.1.2.50
+          ...
+
+Add this line inside that stanza (anywhere between the
+device name line and the next stanza):
+
+          of = /usr/local/lib/aix-print-filters/kyocera_filter
+
+So it becomes:
+
+  kyocera_main_dev:
+          backend = /usr/lib/lpd/rembak
+          flags = -S -p9100
+          host = 10.1.2.50
+          of = /usr/local/lib/aix-print-filters/kyocera_filter
+          s_statfilter = /usr/lib/lpd/bsdshort
+          l_statfilter = /usr/lib/lpd/bsdlong
+
+Save and exit (:wq).
+
+
+---- STEP 1I: Restart the print subsystem ----
+
+  stopsrc -s qdaemon
+  sleep 3
+  startsrc -s qdaemon
+
+Verify it is running:
+
+  lssrc -s qdaemon
+
+Should say "active".
+
+
+---- STEP 1J: Test the Kyocera printer ----
+
+First, confirm the printer is reachable:
+
+  ping -c 3 KYOCERA_IP
+
+Send a test page:
+
+  echo "Test page from AIX - Kyocera" | enq -P kyocera_main
+
+Check the queue status:
+
+  lpstat -a
+  enq -q -P kyocera_main
+
+The printed page should show:
+  1. Your ASCII logo at the top
+  2. Your company header text below the logo
+  3. "Test page from AIX - Kyocera" at the bottom
+
+If the job sits in the queue, see the Troubleshooting
+section at the end of this guide.
+
+
+============================================================
+PART 2: SET UP THE EPSON FX PRINTER
+============================================================
+
+The process is almost identical. The main difference is
+that EPSON FX is a dot-matrix emulation mode, so we keep
+everything plain ASCII (no PCL escape codes).
+
+
+---- STEP 2A: Create the header and logo for EPSON ----
+
+You can reuse the same header file if you want the same
+wording on both printers:
+
+  cp /usr/local/etc/aix-print/kyocera_header.txt \
+     /usr/local/etc/aix-print/epson_header.txt
+
+Or create a different one:
+
+  vi /usr/local/etc/aix-print/epson_header.txt
+
+Same for logo:
+
+  cp /usr/local/etc/aix-print/kyocera_logo.txt \
+     /usr/local/etc/aix-print/epson_logo.txt
+
+
+---- STEP 2B: Create the EPSON filter ----
+
+  vi /usr/local/lib/aix-print-filters/epson_filter
+
+Type the following:
+
+--- CUT HERE ---
+#!/usr/bin/ksh
+HEADER="/usr/local/etc/aix-print/epson_header.txt"
+LOGO="/usr/local/etc/aix-print/epson_logo.txt"
+TEMP="/tmp/prt_$$"
+trap 'rm -f "$TEMP"' EXIT
+{
+  if [ -f "$LOGO" ] && [ -s "$LOGO" ]; then
+    cat "$LOGO"
+    print ""
+  fi
+  if [ -f "$HEADER" ] && [ -s "$HEADER" ]; then
+    cat "$HEADER"
+    print ""
+  fi
+  cat
+} > "$TEMP"
+cat "$TEMP"
+exit 0
+--- CUT HERE ---
+
+Save (:wq) and make executable:
+
+  chmod 755 /usr/local/lib/aix-print-filters/epson_filter
+
+Test it:
+
+  echo "EPSON test" | /usr/local/lib/aix-print-filters/epson_filter
+
+
+---- STEP 2C: Create the queue and device ----
+
+  mkque -q epson_main \
+    -a "up = TRUE" \
+    -a "s_statfilter = /usr/lib/lpd/bsdshort" \
+    -a "l_statfilter = /usr/lib/lpd/bsdlong"
+
+  mkquedev -q epson_main -d epson_main_dev \
+    -a "backend = /usr/lib/lpd/rembak" \
+    -a "flags = -S -p9100" \
+    -a "host = EPSON_IP" \
+    -a "s_statfilter = /usr/lib/lpd/bsdshort" \
+    -a "l_statfilter = /usr/lib/lpd/bsdlong"
+
+Replace EPSON_IP with the actual IP address.
+
+If the EPSON printer uses a different port (some older
+EPSON network cards use port 515 for LPD), change -p9100
+to the correct port number.
+
+
+---- STEP 2D: Edit /etc/qconfig for the EPSON filter ----
+
+  vi /etc/qconfig
+
+Find the epson_main_dev stanza and add the of= line:
+
+  epson_main_dev:
+          backend = /usr/lib/lpd/rembak
+          flags = -S -p9100
+          host = EPSON_IP
+          of = /usr/local/lib/aix-print-filters/epson_filter
+          s_statfilter = /usr/lib/lpd/bsdshort
+          l_statfilter = /usr/lib/lpd/bsdlong
+
+Save (:wq).
+
+
+---- STEP 2E: Restart and test ----
+
+  stopsrc -s qdaemon
+  sleep 3
+  startsrc -s qdaemon
+
+  echo "Test page from AIX - EPSON" | enq -P epson_main
+
+
+============================================================
+PART 3: HOW TO CHANGE THE HEADER TEXT LATER
+============================================================
+
+This is the easiest part. Just edit the text file:
+
+For Kyocera:
+  vi /usr/local/etc/aix-print/kyocera_header.txt
+
+For EPSON:
+  vi /usr/local/etc/aix-print/epson_header.txt
+
+Change the text to whatever you want. Save (:wq).
+
+That is it. The next print job will use the new text.
+No restart is needed - the filter reads the file fresh
+for each print job.
+
+
+============================================================
+PART 4: HOW TO CHANGE THE LOGO LATER
+============================================================
+
+Same idea. Edit the logo file:
+
+  vi /usr/local/etc/aix-print/kyocera_logo.txt
+  vi /usr/local/etc/aix-print/epson_logo.txt
+
+Replace the ASCII art with your new design. Save.
+Next print job will use the new logo.
+
+To remove the logo entirely, either delete the file:
+
+  rm /usr/local/etc/aix-print/kyocera_logo.txt
+
+Or empty it:
+
+  > /usr/local/etc/aix-print/kyocera_logo.txt
+
+
+============================================================
+PART 5: HOW TO REMOVE A PRINTER LATER (ROLLBACK)
+============================================================
+
+If you need to remove a queue completely:
+
+Step 1 - Cancel any pending jobs:
+
+  enq -P QUEUE_NAME -X
+
+Step 2 - Remove the queue device:
+
+  rmquedev -q QUEUE_NAME -d QUEUE_NAME_dev
+
+Step 3 - Remove the queue:
+
+  rmque -q QUEUE_NAME
+
+Step 4 - Restart qdaemon:
+
+  stopsrc -s qdaemon
+  sleep 3
+  startsrc -s qdaemon
+
+Step 5 - Optionally delete the filter and config files:
+
+  rm /usr/local/lib/aix-print-filters/QUEUE_filter
+  rm /usr/local/etc/aix-print/QUEUE_header.txt
+  rm /usr/local/etc/aix-print/QUEUE_logo.txt
+
+Or to restore from backup:
+
+  cp /etc/qconfig.backup.YYYYMMDD /etc/qconfig
+  stopsrc -s qdaemon
+  sleep 3
+  startsrc -s qdaemon
+
+
+============================================================
+PART 6: TROUBLESHOOTING
+============================================================
+
+Problem: mkque says "Queue already exists"
+  Fix: Remove it first, then recreate:
+    rmquedev -q NAME -d NAME_dev
+    rmque -q NAME
+
+Problem: Jobs stay in queue, nothing prints
+  Check 1 - Can you reach the printer?
+    ping PRINTER_IP
+  Check 2 - Is port 9100 open?
+    If you have telnet:  telnet PRINTER_IP 9100
+    (If it connects, the port is open. Type quit to exit.)
+  Check 3 - Is the queue up?
+    enq -q -P QUEUE_NAME
+    If it says DOWN, bring it up:
+    enq -P QUEUE_NAME -U
+  Check 4 - Check qdaemon log:
+    cat /var/adm/qdaemon
+
+Problem: Header or logo not showing
+  Check 1 - Test the filter manually:
+    echo "test" | /usr/local/lib/aix-print-filters/kyocera_filter
+    (You should see logo + header + "test")
+  Check 2 - Is the of= line in /etc/qconfig?
+    grep "of.*=" /etc/qconfig
+  Check 3 - Is the filter executable?
+    ls -la /usr/local/lib/aix-print-filters/
+    (Should show rwxr-xr-x)
+  Check 4 - Did you restart qdaemon after editing /etc/qconfig?
+
+Problem: Text looks garbled on EPSON FX
+  - Make sure header and logo are pure ASCII
+  - No special characters, no tabs (use spaces)
+  - Keep lines under 80 characters wide
+
+Problem: Permission denied
+  - All commands must run as root
+  - Filter must be executable:
+    chmod 755 /usr/local/lib/aix-print-filters/*_filter
+
+
+============================================================
+USEFUL COMMANDS REFERENCE
+============================================================
+
+  lpstat -a                    List all queues
+  enq -q -P QUEUE             Show queue status
+  enq -A -P QUEUE             Show all jobs in queue
+  enq -P QUEUE -X             Cancel all jobs
+  enq -P QUEUE -U             Bring queue UP
+  enq -P QUEUE -D             Bring queue DOWN
+  lsallq                      List all queue names
+  lsque -q QUEUE              Show queue attributes
+  lsquedev -q Q -d Q_dev      Show device attributes
+  cat /etc/qconfig            View full config
+  stopsrc -s qdaemon          Stop print subsystem
+  startsrc -s qdaemon         Start print subsystem
+
+To print a file:
+  enq -P QUEUE_NAME /path/to/file.txt
+
+To print from a program:
+  cat report.txt | enq -P QUEUE_NAME
+
+
+============================================================
+SUMMARY OF FILES CREATED
+============================================================
+
+Filters (the scripts):
+  /usr/local/lib/aix-print-filters/kyocera_filter
+  /usr/local/lib/aix-print-filters/epson_filter
+
+Configuration (edit these to customize):
+  /usr/local/etc/aix-print/kyocera_header.txt
+  /usr/local/etc/aix-print/kyocera_logo.txt
+  /usr/local/etc/aix-print/epson_header.txt
+  /usr/local/etc/aix-print/epson_logo.txt
+
+System config (modified):
+  /etc/qconfig  (added queue stanzas + of= filter lines)
+  /etc/qconfig.backup.YYYYMMDD  (your backup)
