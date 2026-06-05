@@ -63,6 +63,8 @@ Press i to enter insert mode, then type:
 
 ================================================================
                         CUSTOMER AAA
+                        STREET 123
+                        ATHENS
 ================================================================
 
 Press Esc, then type :wq and press Enter to save.
